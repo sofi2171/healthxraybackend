@@ -1,19 +1,22 @@
-// server.js
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const bodyParser = require('body-parser');
 const PDFDocument = require('pdfkit');
-const fetch = require('node-fetch');
+const { Configuration, OpenAIApi } = require('openai');
 
 const app = express();
 
 // Middleware
-app.use(cors()); // Frontend alag domain pe hai to
+app.use(cors());
 app.use(bodyParser.json());
 
 const PORT = process.env.PORT || 3000;
-const GEMINI_KEY = process.env.GEMINI_API_KEY;
+const OPENAI_KEY = process.env.OPENAI_API_KEY;
+
+// ===== OpenAI Setup =====
+const configuration = new Configuration({ apiKey: OPENAI_KEY });
+const openai = new OpenAIApi(configuration);
 
 // ===== API Route: Check Symptoms & Generate PDF =====
 app.post('/api/check-symptoms', async (req, res) => {
@@ -24,27 +27,29 @@ app.post('/api/check-symptoms', async (req, res) => {
             return res.status(400).json({ error: "No symptoms provided" });
         }
 
-        // ===== Gemini API Call =====
-        let diagnosisData = null;
+        // ===== OpenAI Call =====
+        let diagnosisText = "";
         try {
-            const apiResponse = await fetch('https://api.gemini.com/v1/diagnosis', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${GEMINI_KEY}`
-                },
-                body: JSON.stringify({
-                    symptoms: symptoms,
-                    age: age || 30,
-                    gender: gender || 'male'
-                })
+            const prompt = `
+            You are a medical assistant. Based on the following symptoms, suggest possible conditions:
+            Symptoms: ${symptoms.join(", ")}
+            Age: ${age || 'N/A'}, Gender: ${gender || 'N/A'}
+            List 5 most likely conditions with short probability estimate.
+            Format: Condition Name (approx %)
+            `;
+
+            const completion = await openai.createChatCompletion({
+                model: "gpt-4",
+                messages: [{ role: "user", content: prompt }],
+                temperature: 0.7,
+                max_tokens: 500
             });
 
-            diagnosisData = await apiResponse.json();
-            console.log("Gemini API Response:", diagnosisData); // Debug
+            diagnosisText = completion.data.choices[0].message.content;
+            console.log("OpenAI Response:", diagnosisText);
         } catch (err) {
-            console.error("Gemini API Error:", err);
-            diagnosisData = null; // fallback
+            console.error("OpenAI API Error:", err);
+            diagnosisText = "Unable to fetch conditions from AI. Consult a doctor.";
         }
 
         // ===== Generate PDF =====
@@ -61,15 +66,9 @@ app.post('/api/check-symptoms', async (req, res) => {
         doc.text('Symptoms Provided:');
         symptoms.forEach((symptom, i) => doc.text(`${i + 1}. ${symptom}`));
         doc.moveDown();
-        doc.text('Potential Conditions:', { underline: true });
-
-        if (diagnosisData && diagnosisData.conditions && diagnosisData.conditions.length > 0) {
-            diagnosisData.conditions.forEach((condition, i) => {
-                doc.text(`${i + 1}. ${condition.name} (${(condition.probability * 100).toFixed(2)}%)`);
-            });
-        } else {
-            doc.text("No conditions found. Consult a doctor for accurate diagnosis.");
-        }
+        doc.text('Potential Conditions (AI Generated):', { underline: true });
+        doc.moveDown();
+        doc.text(diagnosisText);
 
         doc.end(); // PDF send to frontend
 
